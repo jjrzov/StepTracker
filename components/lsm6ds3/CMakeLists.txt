@@ -1,5 +1,10 @@
 idf_component_register(
-    SRCS "lsm6ds3.c"
-    INCLUDE_DIRS "include"
-    REQUIRES driver
+    SRCS 
+        "lsm6ds3.c"
+        "driver/lsm6ds3_reg.c"
+    INCLUDE_DIRS 
+        "include"
+        "driver"
+    PRIV_REQUIRES 
+        driver
 )
