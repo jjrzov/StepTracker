@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -72,17 +73,27 @@ static void imu_task(void *arg)
 static void fusion_task(void *arg)
 {
     lsm6ds3_madgwick_filter_t filter;
-    lsm6ds3_madgwick_init(&filter, 0.1f, SAMPLE_RATE_HZ);
+    lsm6ds3_madgwick_init(&filter, 0.01f, SAMPLE_RATE_HZ);
 
     imu_data_t data;
     const float dt = 1.0f / SAMPLE_RATE_HZ;
-
-    // Convert gyro mdps -> dps for fusion (library expects dps)
     float gyro_dps[3];
+
+    // Step detection state
+    float filtered_mag = 1000.0f;
+    bool above_threshold = false;
+    TickType_t last_step_time = 0;
+    uint32_t step_count = 0;
+
+    // Tunable parameters
+    const float STEP_THRESHOLD = 1150.0f;
+    const float LOW_PASS_ALPHA = 0.2f;
+    const uint32_t MIN_STEP_MS = 400;
 
     while (1) {
         if (xQueueReceive(imu_queue, &data, portMAX_DELAY) == pdTRUE) {
 
+            // --- Sensor Fusion ---
             gyro_dps[0] = data.gyro_mdps[0] / 1000.0f;
             gyro_dps[1] = data.gyro_mdps[1] / 1000.0f;
             gyro_dps[2] = data.gyro_mdps[2] / 1000.0f;
@@ -91,14 +102,38 @@ static void fusion_task(void *arg)
 
             lsm6ds3_euler_angles_t euler;
             lsm6ds3_madgwick_get_euler(&filter, &euler);
-
             float angle_from_vertical = lsm6ds3_calculate_angle_from_vertical(
                 euler.roll, euler.pitch);
 
-            // Update shared result safely
+            // --- Step Detection ---
+            float mag = sqrtf(
+                data.accel_mg[0] * data.accel_mg[0] +
+                data.accel_mg[1] * data.accel_mg[1] +
+                data.accel_mg[2] * data.accel_mg[2]
+            );
+
+            filtered_mag = LOW_PASS_ALPHA * mag + 
+                          (1.0f - LOW_PASS_ALPHA) * filtered_mag;
+
+            TickType_t now = xTaskGetTickCount();
+            uint32_t ms_since_last = (now - last_step_time) * portTICK_PERIOD_MS;
+
+            if (!above_threshold && filtered_mag > STEP_THRESHOLD) {
+                above_threshold = true;
+            } else if (above_threshold && filtered_mag < STEP_THRESHOLD) {
+                above_threshold = false;
+                if (ms_since_last > MIN_STEP_MS) {
+                    step_count++;
+                    last_step_time = now;
+                    ESP_LOGI("STEP", "Step detected! Total: %lu", step_count);
+                }
+            }
+
+            // --- Update shared result ---
             if (xSemaphoreTake(fusion_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 shared_result.euler = euler;
                 shared_result.angle_from_vertical = angle_from_vertical;
+                shared_result.step_count = step_count;
                 xSemaphoreGive(fusion_mutex);
             }
         }
@@ -116,11 +151,11 @@ static void output_task(void *arg)
             xSemaphoreGive(fusion_mutex);
         }
 
-        ESP_LOGI(TAG, "Roll=%.1f  Pitch=%.1f  Yaw=%.1f  VertAngle=%.1f",
-                 result.euler.roll,
-                 result.euler.pitch,
-                 result.euler.yaw,
-                 result.angle_from_vertical);
+        ESP_LOGI(TAG, "Roll=%.1f  Pitch=%.1f  Yaw=%.1f  Steps=%lu",
+                result.euler.roll,
+                result.euler.pitch,
+                result.euler.yaw,
+                result.step_count);
 
         vTaskDelay(pdMS_TO_TICKS(200));  // print at 5Hz
     }
