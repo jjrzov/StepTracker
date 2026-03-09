@@ -38,7 +38,6 @@ typedef struct {
 
 
 
-static void platform_delay(uint32_t ms);
 esp_err_t lsm6ds3_init(lsm6ds3_handle_t *handle, const lsm6ds3_config_t *config);
 esp_err_t lsm6ds3_read_accel(lsm6ds3_handle_t *handle, float accel_mg[3]);
 esp_err_t lsm6ds3_read_gyro(lsm6ds3_handle_t *handle, float gyro_mdps[3]);

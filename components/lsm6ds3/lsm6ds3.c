@@ -51,6 +51,8 @@ esp_err_t lsm6ds3_init(lsm6ds3_handle_t *handle, const lsm6ds3_config_t *config)
     handle->ctx.write_reg = platform_write;
     handle->ctx.read_reg = platform_read;
     
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     uint8_t whoamI;
     if (handle->ctx.read_reg(handle->ctx.handle, LSM6DS3_WHO_AM_I, &whoamI, 1) != 0) {
         ESP_LOGE(TAG, "Failed to read device ID");
@@ -73,7 +75,8 @@ esp_err_t lsm6ds3_init(lsm6ds3_handle_t *handle, const lsm6ds3_config_t *config)
     // Gyro: 104Hz, 250dps
     uint8_t ctrl2 = 0x40;
     handle->ctx.write_reg(handle->ctx.handle, LSM6DS3_CTRL2_G, &ctrl2, 1);
-    
+
+    vTaskDelay(pdMS_TO_TICKS(100));  // wait for gyro to start up
 
     ESP_LOGI(TAG, "LSM6DS3 initialized successfully (ID: 0x%02X)", whoamI);
     return ESP_OK;
