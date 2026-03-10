@@ -5,6 +5,5 @@
 .vscode/launch.json
 .vscode/ipch
 sdkconfig.esp32dev
-sdkconfig.firebeetle32
 test/
 lib/
