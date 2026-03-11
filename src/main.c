@@ -39,6 +39,7 @@ typedef struct {
     lsm6ds3_euler_angles_t euler;
     float angle_from_vertical;
     uint32_t step_count;
+    float distance_m;
 } fusion_result_t;
 
 // Shared resources
@@ -82,13 +83,20 @@ static void fusion_task(void *arg)
     // Step detection state
     float filtered_mag = 1000.0f;
     bool above_threshold = false;
-    TickType_t last_step_time = 0;
+    TickType_t last_step_time = xTaskGetTickCount();
     uint32_t step_count = 0;
 
     // Tunable parameters
     const float STEP_THRESHOLD = 1150.0f;
     const float LOW_PASS_ALPHA = 0.2f;
-    const uint32_t MIN_STEP_MS = 400;
+    const uint32_t MIN_STEP_MS = 500;
+    const uint32_t MAX_STEP_MS = 2000;
+    const float MIN_RANGE = 150.0f;
+
+    // Stride estimation state
+    float step_max_mag = 0.0f;
+    float step_min_mag = 2000.0f;
+    float total_distance_m = 0.0f;
 
     while (1) {
         if (xQueueReceive(imu_queue, &data, portMAX_DELAY) == pdTRUE) {
@@ -112,21 +120,46 @@ static void fusion_task(void *arg)
                 data.accel_mg[2] * data.accel_mg[2]
             );
 
-            filtered_mag = LOW_PASS_ALPHA * mag + 
-                          (1.0f - LOW_PASS_ALPHA) * filtered_mag;
+            filtered_mag = LOW_PASS_ALPHA * mag + (1.0f - LOW_PASS_ALPHA) * filtered_mag;
 
             TickType_t now = xTaskGetTickCount();
-            uint32_t ms_since_last = (now - last_step_time) * portTICK_PERIOD_MS;
+            TickType_t ticks_since_last = now - last_step_time;
+            uint32_t ms_since_last = pdTICKS_TO_MS(ticks_since_last);
 
+            // Track min/max for stride estimation
+            if (filtered_mag > step_max_mag) step_max_mag = filtered_mag;
+            if (filtered_mag < step_min_mag) step_min_mag = filtered_mag;
+
+            // Add separate above_threshold timer
+            TickType_t above_threshold_time = xTaskGetTickCount();
+
+            // Replace the MAX_STEP_MS reset block with this
+            if (above_threshold && (pdTICKS_TO_MS(now - above_threshold_time) > MAX_STEP_MS)) {
+                above_threshold = false;
+                step_max_mag = 0.0f;
+                step_min_mag = 2000.0f;
+            }
+
+            // Update above_threshold_time when rising edge fires
             if (!above_threshold && filtered_mag > STEP_THRESHOLD) {
                 above_threshold = true;
+                above_threshold_time = now;
+                ESP_LOGI("STEP", "rising edge %.1f", filtered_mag);
             } else if (above_threshold && filtered_mag < STEP_THRESHOLD) {
                 above_threshold = false;
-                if (ms_since_last > MIN_STEP_MS) {
+                float range = step_max_mag - step_min_mag;
+                ESP_LOGI("STEP", "falling edge ms=%lu range=%.1f", ms_since_last, range);
+
+                if (ms_since_last > MIN_STEP_MS && range > MIN_RANGE) {
                     step_count++;
                     last_step_time = now;
-                    ESP_LOGI("STEP", "Step detected! Total: %lu", step_count);
+                    float step_length = 0.75f * (500.0f / (float)ms_since_last);
+                    step_length = fmaxf(0.4f, fminf(1.2f, step_length));
+                    total_distance_m += step_length;
                 }
+
+                step_max_mag = 0.0f;
+                step_min_mag = 2000.0f;
             }
 
             // --- Update shared result ---
@@ -134,6 +167,7 @@ static void fusion_task(void *arg)
                 shared_result.euler = euler;
                 shared_result.angle_from_vertical = angle_from_vertical;
                 shared_result.step_count = step_count;
+                shared_result.distance_m = total_distance_m;
                 xSemaphoreGive(fusion_mutex);
             }
         }
@@ -151,11 +185,11 @@ static void output_task(void *arg)
             xSemaphoreGive(fusion_mutex);
         }
 
-        ESP_LOGI(TAG, "Roll=%.1f  Pitch=%.1f  Yaw=%.1f  Steps=%lu",
-                result.euler.roll,
-                result.euler.pitch,
-                result.euler.yaw,
-                result.step_count);
+        ESP_LOGI(TAG, "Roll=%.1f  Pitch=%.1f  Steps=%lu  Dist=%.2fm",
+            result.euler.roll,
+            result.euler.pitch,
+            result.step_count,
+            result.distance_m);
 
         vTaskDelay(pdMS_TO_TICKS(200));  // print at 5Hz
     }
@@ -200,7 +234,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Calibration done, starting fusion...");
 
     // --- Create FreeRTOS objects ---
-    imu_queue    = xQueueCreate(10, sizeof(imu_data_t));
+    imu_queue    = xQueueCreate(50, sizeof(imu_data_t));
     fusion_mutex = xSemaphoreCreateMutex();
 
     // --- Start Tasks ---
